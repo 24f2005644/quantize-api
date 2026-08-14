@@ -195,7 +195,8 @@ def build_inventory(
     return True, inventory, total_bytes, package_digest
 
 
-def validate_freeze_top_level(data: Any) -> bool:
+def validate_freeze_top_level(data):
+
     if not isinstance(data, dict):
         return False
 
@@ -206,7 +207,7 @@ def validate_freeze_top_level(data: Any) -> bool:
 
     if (
         not isinstance(freeze_id, str)
-        or freeze_id == ""
+        or not freeze_id
         or len(freeze_id) > 128
     ):
         return False
@@ -214,37 +215,38 @@ def validate_freeze_top_level(data: Any) -> bool:
     calibration = data.get("calibrationDigest")
     tokenizer = data.get("tokenizerDigest")
 
-    if not isinstance(calibration, str) or calibration == "":
+    if not isinstance(calibration, str) or not calibration:
         return False
 
-    if not isinstance(tokenizer, str) or tokenizer == "":
+    if not isinstance(tokenizer, str) or not tokenizer:
         return False
 
     allowed = data.get("allowedUnsupportedReasons")
 
-    # Global validation.
     if not isinstance(allowed, list):
         return False
 
     if any(
-        not isinstance(reason, str) or reason == ""
-        for reason in allowed
+        not isinstance(x, str) or x == ""
+        for x in allowed
     ):
         return False
 
-    # Allowed reasons must be unique.
     if len(allowed) != len(set(allowed)):
         return False
 
     candidates = data.get("candidates")
 
-    if not isinstance(candidates, list) or len(candidates) == 0:
+    if not isinstance(candidates, list):
         return False
 
-    # Candidate names are a global freeze constraint.
+    if len(candidates) == 0:
+        return False
+
     names = []
 
     for candidate in candidates:
+
         if not isinstance(candidate, dict):
             return False
 
@@ -255,7 +257,6 @@ def validate_freeze_top_level(data: Any) -> bool:
 
         names.append(name)
 
-    # Candidate names must be unique.
     if len(names) != len(set(names)):
         return False
 
