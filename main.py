@@ -147,32 +147,11 @@ def round12(value: float) -> float:
 # ============================================================
 
 def build_inventory(
-    files: Any,
-) -> Tuple[
-    bool,
-    List[Dict[str, Any]],
-    Optional[int],
-    Optional[str],
-]:
-    """
-    Validate a candidate files object and construct:
+    files: Any
+) -> Tuple[bool, List[Dict[str, Any]], Optional[int], Optional[str]]:
 
-    [
-        {
-            "name": "...",
-            "bytes": ...,
-            "sha256": "..."
-        }
-    ]
-
-    sorted by UTF-8 filename.
-    """
-
-    if not isinstance(files, dict):
-        return False, [], None, None
-
-    # Assignment says candidate files object must be non-empty.
-    if len(files) == 0:
+    # Candidate-level invalid files.
+    if not isinstance(files, dict) or len(files) == 0:
         return False, [], None, None
 
     inventory = []
@@ -183,23 +162,19 @@ def build_inventory(
         if not isinstance(filename, str) or filename == "":
             return False, [], None, None
 
-        # File text must be a string.
+        # File content is data and must be a string.
         if not isinstance(text, str):
             return False, [], None, None
 
-        try:
-            encoded = text.encode("utf-8")
-        except UnicodeEncodeError:
-            return False, [], None, None
+        raw = text.encode("utf-8")
 
-        inventory.append(
-            {
-                "name": filename,
-                "bytes": len(encoded),
-                "sha256": hashlib.sha256(encoded).hexdigest(),
-            }
-        )
+        inventory.append({
+            "name": filename,
+            "bytes": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+        })
 
+    # Sort by UTF-8 filename.
     inventory.sort(
         key=lambda item: item["name"].encode("utf-8")
     )
@@ -209,24 +184,18 @@ def build_inventory(
         for item in inventory
     )
 
-    package_digest = sha256_json(inventory)
+    package_digest = hashlib.sha256(
+        json.dumps(
+            inventory,
+            ensure_ascii=False,
+            separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
 
-    return (
-        True,
-        inventory,
-        total_bytes,
-        package_digest,
-    )
+    return True, inventory, total_bytes, package_digest
 
 
 def validate_freeze_top_level(data: Any) -> bool:
-    """
-    Validate only the freeze request envelope.
-
-    Candidate-specific problems are handled by build_freeze_response()
-    instead of rejecting the entire HTTP request.
-    """
-
     if not isinstance(data, dict):
         return False
 
@@ -245,147 +214,79 @@ def validate_freeze_top_level(data: Any) -> bool:
     calibration = data.get("calibrationDigest")
     tokenizer = data.get("tokenizerDigest")
 
-    if (
-        not isinstance(calibration, str)
-        or calibration == ""
-    ):
+    if not isinstance(calibration, str) or calibration == "":
         return False
 
-    if (
-        not isinstance(tokenizer, str)
-        or tokenizer == ""
-    ):
+    if not isinstance(tokenizer, str) or tokenizer == "":
         return False
 
     allowed = data.get("allowedUnsupportedReasons")
-    
+
+    # Global validation.
     if not isinstance(allowed, list):
         return False
-    
-    if any(not isinstance(x, str) or x == "" for x in allowed):
+
+    if any(
+        not isinstance(reason, str) or reason == ""
+        for reason in allowed
+    ):
+        return False
+
+    # Allowed reasons must be unique.
+    if len(allowed) != len(set(allowed)):
         return False
 
     candidates = data.get("candidates")
 
-    # The assignment explicitly requires a non-empty array here.
-    if (
-        not isinstance(candidates, list)
-        or len(candidates) == 0
-    ):
+    if not isinstance(candidates, list) or len(candidates) == 0:
+        return False
+
+    # Candidate names are a global freeze constraint.
+    names = []
+
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            return False
+
+        name = candidate.get("name")
+
+        if not isinstance(name, str) or name == "":
+            return False
+
+        names.append(name)
+
+    # Candidate names must be unique.
+    if len(names) != len(set(names)):
         return False
 
     return True
 
 
-def build_freeze_response(
-    data: Dict[str, Any],
-) -> Dict[str, Any]:
-    """
-    Construct the deterministic freeze response.
-    """
-
+def build_freeze_response(data: Dict[str, Any]) -> Dict[str, Any]:
     calibration_digest = data["calibrationDigest"]
     tokenizer_digest = data["tokenizerDigest"]
+
     allowed_reasons = set(
-        set(data["allowedUnsupportedReasons"])
+        data["allowedUnsupportedReasons"]
     )
-
-    candidates = data["candidates"]
-
-    # Determine duplicate valid candidate names.
-    all_names = []
-
-    for candidate in candidates:
-        if not isinstance(candidate, dict):
-            continue
-
-        name = candidate.get("name")
-
-        if isinstance(name, str) and name != "":
-            all_names.append(name)
-
-    duplicate_names = {
-        name
-        for name in all_names
-        if all_names.count(name) > 1
-    }
 
     results = []
 
-    for candidate in candidates:
+    for candidate in data["candidates"]:
 
-        # ----------------------------------------------------
-        # Malformed candidate
-        # ----------------------------------------------------
-        if not isinstance(candidate, dict):
-            results.append(
-                {
-                    "name": "",
-                    "status": "invalid",
-                    "inventory": [],
-                    "totalBytes": None,
-                    "packageDigest": None,
-                    "reasonCodes": [
-                        "INVALID_INPUT"
-                    ],
-                }
-            )
-            continue
+        name = candidate["name"]
 
-        name = candidate.get("name")
-
-        # ----------------------------------------------------
-        # Candidate name
-        # ----------------------------------------------------
-        if (
-            not isinstance(name, str)
-            or name == ""
-            or name in duplicate_names
-        ):
-            results.append(
-                {
-                    "name": (
-                        name
-                        if isinstance(name, str)
-                        else ""
-                    ),
-                    "status": "invalid",
-                    "inventory": [],
-                    "totalBytes": None,
-                    "packageDigest": None,
-                    "reasonCodes": [
-                        "INVALID_INPUT"
-                    ],
-                }
-            )
-            continue
-
-        # ----------------------------------------------------
+        # --------------------------------------------------
         # Files / inventory
-        # ----------------------------------------------------
-        (
-            files_valid,
-            inventory,
-            total_bytes,
-            package_digest,
-        ) = build_inventory(
-            candidate.get("files")
+        # --------------------------------------------------
+
+        files_valid, inventory, total_bytes, package_digest = (
+            build_inventory(candidate.get("files"))
         )
 
-        if not files_valid:
-            results.append(
-                {
-                    "name": name,
-                    "status": "invalid",
-                    "inventory": [],
-                    "totalBytes": None,
-                    "packageDigest": None,
-                    "reasonCodes": [
-                        "INVALID_INPUT"
-                    ],
-                }
-            )
-            continue
+        # --------------------------------------------------
+        # Candidate reason evaluation
+        # --------------------------------------------------
 
         reason_codes = []
 
@@ -393,9 +294,10 @@ def build_freeze_response(
             "unsupportedReason"
         )
 
-        # ----------------------------------------------------
+        # --------------------------------------------------
         # Unsupported candidate
-        # ----------------------------------------------------
+        # --------------------------------------------------
+
         if unsupported_reason is not None:
 
             if (
@@ -403,60 +305,73 @@ def build_freeze_response(
                 and unsupported_reason != ""
                 and unsupported_reason in allowed_reasons
             ):
+                # An explicitly allowed unsupported reason
+                # makes the candidate unsupported.
                 status = "unsupported"
 
             else:
+                # Unsupported reason exists but is not allowed.
                 status = "invalid"
+
                 reason_codes.append(
                     "UNALLOWED_UNSUPPORTED_REASON"
                 )
 
-        # ----------------------------------------------------
+                # Still evaluate the normal candidate constraints.
+                if candidate.get("loadable") is not True:
+                    reason_codes.append("NOT_LOADABLE")
+
+                if candidate.get("calibrationDigest") != calibration_digest:
+                    reason_codes.append("CALIBRATION_MISMATCH")
+
+                if candidate.get("tokenizerDigest") != tokenizer_digest:
+                    reason_codes.append("TOKENIZER_MISMATCH")
+
+        # --------------------------------------------------
         # Normal candidate
-        # ----------------------------------------------------
+        # --------------------------------------------------
+
         else:
-            loadable = candidate.get("loadable")
 
-            if loadable is not True:
-                reason_codes.append(
-                    "NOT_LOADABLE"
-                )
+            if candidate.get("loadable") is not True:
+                reason_codes.append("NOT_LOADABLE")
 
-            if (
-                candidate.get("calibrationDigest")
-                != calibration_digest
-            ):
-                reason_codes.append(
-                    "CALIBRATION_MISMATCH"
-                )
+            if candidate.get("calibrationDigest") != calibration_digest:
+                reason_codes.append("CALIBRATION_MISMATCH")
 
-            if (
-                candidate.get("tokenizerDigest")
-                != tokenizer_digest
-            ):
-                reason_codes.append(
-                    "TOKENIZER_MISMATCH"
-                )
+            if candidate.get("tokenizerDigest") != tokenizer_digest:
+                reason_codes.append("TOKENIZER_MISMATCH")
 
             if reason_codes:
                 status = "invalid"
             else:
                 status = "frozen"
 
-        results.append(
-            {
-                "name": name,
-                "status": status,
-                "inventory": inventory,
-                "totalBytes": total_bytes,
-                "packageDigest": package_digest,
-                "reasonCodes": sorted_unique_codes(
-                    reason_codes
-                ),
-            }
-        )
+        # --------------------------------------------------
+        # Invalid files always invalidate the candidate.
+        # --------------------------------------------------
 
-    # Required ordering: UTF-8 candidate name.
+        if not files_valid:
+            status = "invalid"
+            reason_codes.append("INVALID_INPUT")
+
+            inventory = []
+            total_bytes = None
+            package_digest = None
+
+        results.append({
+            "name": name,
+            "status": status,
+            "inventory": inventory,
+            "totalBytes": total_bytes,
+            "packageDigest": package_digest,
+            "reasonCodes": sorted_unique_codes(reason_codes),
+        })
+
+    # ------------------------------------------------------
+    # Sort candidates by UTF-8 candidate name
+    # ------------------------------------------------------
+
     results.sort(
         key=lambda item: item["name"].encode("utf-8")
     )
@@ -465,7 +380,6 @@ def build_freeze_response(
         "freezeId": data["freezeId"],
         "candidates": results,
     }
-
 
 # ============================================================
 # SELECT
@@ -1258,88 +1172,62 @@ def select_candidates(
 # ============================================================
 
 @app.post("/quantize")
-async def quantize(
-    request: Request,
-):
+async def quantize(request: Request):
 
     # ========================================================
-    # Parse JSON
+    # 1. Parse JSON
     # ========================================================
     try:
-        data = await parse_json_request(
-            request
-        )
+        data = await parse_json_request(request)
 
     except Exception as exc:
-        print(
-            "JSON PARSE ERROR:",
-            repr(exc),
-        )
+        print("JSON PARSE ERROR:", repr(exc))
 
         return JSONResponse(
             status_code=400,
-            content={
-                "error": "INVALID_INPUT"
-            },
+            content={"error": "INVALID_INPUT"},
         )
 
     # ========================================================
-    # Top-level object
+    # 2. Top-level request must be an object
     # ========================================================
-    if not isinstance(
-        data,
-        dict,
-    ):
-
-        print(
-            "INVALID TOP LEVEL:",
-            repr(data),
-        )
+    if not isinstance(data, dict):
+        print("INVALID TOP LEVEL:", repr(data))
 
         return JSONResponse(
             status_code=400,
-            content={
-                "error": "INVALID_INPUT"
-            },
+            content={"error": "INVALID_INPUT"},
         )
 
-    phase = data.get(
-        "phase"
-    )
-
     # ========================================================
-    # Phase
+    # 3. Phase must exist and be exactly freeze/select
     # ========================================================
-    if phase not in (
-        "freeze",
-        "select",
-    ):
+    phase = data.get("phase")
 
-        print(
-            "INVALID PHASE:",
-            repr(phase),
-        )
+    if phase not in ("freeze", "select"):
+        print("INVALID PHASE:", repr(phase))
 
         return JSONResponse(
             status_code=400,
-            content={
-                "error": "INVALID_INPUT"
-            },
+            content={"error": "INVALID_INPUT"},
         )
 
     # ========================================================
-    # FREEZE
+    # 4. FREEZE
     # ========================================================
     if phase == "freeze":
 
-        if not validate_freeze_top_level(
-            data
-        ):
+        # ----------------------------------------------------
+        # Validate GLOBAL freeze input.
+        #
+        # Candidate-level problems such as empty files,
+        # unsupported reasons, bad loadability, etc. should
+        # NOT cause HTTP 400. They belong in the candidate
+        # result.
+        # ----------------------------------------------------
+        if not validate_freeze_top_level(data):
 
-            print(
-                "FREEZE VALIDATION FAILED:"
-            )
-
+            print("FREEZE VALIDATION FAILED:")
             print(
                 json.dumps(
                     data,
@@ -1350,107 +1238,79 @@ async def quantize(
 
             return JSONResponse(
                 status_code=400,
-                content={
-                    "error": "INVALID_INPUT"
-                },
+                content={"error": "INVALID_INPUT"},
             )
 
-        freeze_id = data[
-            "freezeId"
-        ]
+        freeze_id = data["freezeId"]
 
         # ----------------------------------------------------
         # Existing freezeId
         # ----------------------------------------------------
         if freeze_id in FREEZES:
 
-            stored = FREEZES[
-                freeze_id
-            ]
+            stored = FREEZES[freeze_id]
 
-            # Exact replay.
-            if stored[
-                "request"
-            ] == data:
+            # Exact replay:
+            # same freeze input -> return stored response unchanged.
+            if stored["request"] == data:
 
                 return JSONResponse(
                     status_code=200,
                     content=deepcopy(
-                        stored[
-                            "response"
-                        ]
+                        stored["response"]
                     ),
                 )
 
-            # Same ID + different input.
+            # Same ID, different freeze input.
             return JSONResponse(
                 status_code=409,
                 content={
-                    "error":
-                    "FREEZE_ID_CONFLICT"
+                    "error": "FREEZE_ID_CONFLICT"
                 },
             )
 
         # ----------------------------------------------------
-        # New freeze
+        # New valid freeze
         # ----------------------------------------------------
-        response = build_freeze_response(
-            data
-        )
+        response = build_freeze_response(data)
 
-        FREEZES[
-            freeze_id
-        ] = {
-            "request": deepcopy(
-                data
-            ),
-            "response": deepcopy(
-                response
-            ),
+        # Store ONLY after global validation succeeds.
+        # Therefore invalid freeze requests do not reserve IDs.
+        FREEZES[freeze_id] = {
+            "request": deepcopy(data),
+            "response": deepcopy(response),
         }
 
         return JSONResponse(
             status_code=200,
-            content=response,
+            content=deepcopy(response),
         )
 
     # ========================================================
-    # SELECT
+    # 5. SELECT
     # ========================================================
+
+    # freezeId must be a non-empty string
+    freeze_id = data.get("freezeId")
+
+    # candidates must be an array
+    candidates = data.get("candidates")
+
+    # rows must be an array
+    rows = data.get("rows")
+
+    # policy must be an object
+    policy = data.get("policy")
+
     if (
-        not isinstance(
-            data.get(
-                "freezeId"
-            ),
-            str,
-        )
-        or data.get(
-            "freezeId"
-        ) == ""
-        or not isinstance(
-            data.get(
-                "candidates"
-            ),
-            list,
-        )
-        or not isinstance(
-            data.get(
-                "rows"
-            ),
-            list,
-        )
-        or not isinstance(
-            data.get(
-                "policy"
-            ),
-            dict,
-        )
+        not isinstance(freeze_id, str)
+        or freeze_id == ""
+        or not isinstance(candidates, list)
+        or not isinstance(rows, list)
+        or not isinstance(policy, dict)
     ):
 
-        print(
-            "SELECT VALIDATION FAILED:"
-        )
-
+        print("SELECT VALIDATION FAILED:")
         print(
             json.dumps(
                 data,
@@ -1461,20 +1321,20 @@ async def quantize(
 
         return JSONResponse(
             status_code=400,
-            content={
-                "error": "INVALID_INPUT"
-            },
+            content={"error": "INVALID_INPUT"},
         )
 
-    response = select_candidates(
-        data
-    )
+    # --------------------------------------------------------
+    # Selection request is structurally valid.
+    # Let select_candidates() perform all candidate,
+    # policy, manifest, prediction, and constraint checks.
+    # --------------------------------------------------------
+    response = select_candidates(data)
 
     return JSONResponse(
         status_code=200,
-        content=response,
+        content=deepcopy(response),
     )
-
 
 # ============================================================
 # Health endpoint
