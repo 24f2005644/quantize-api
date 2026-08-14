@@ -258,8 +258,11 @@ def validate_freeze_top_level(data: Any) -> bool:
         return False
 
     allowed = data.get("allowedUnsupportedReasons")
-
-    if not unique_strings(allowed):
+    
+    if not isinstance(allowed, list):
+        return False
+    
+    if any(not isinstance(x, str) or x == "" for x in allowed):
         return False
 
     candidates = data.get("candidates")
@@ -284,7 +287,7 @@ def build_freeze_response(
     calibration_digest = data["calibrationDigest"]
     tokenizer_digest = data["tokenizerDigest"]
     allowed_reasons = set(
-        data["allowedUnsupportedReasons"]
+        set(data["allowedUnsupportedReasons"])
     )
 
     candidates = data["candidates"]
